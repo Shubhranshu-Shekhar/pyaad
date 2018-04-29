@@ -88,7 +88,7 @@ def weight_update_iter_grad(x, y, hf,
             if np.abs(loss - loss_old) <= delta:
                 opt_success = True
             # print(sprintf("Iter: %d; old loss: %f; loss: %f; del_loss: %f", k, loss_old, loss, abs(loss - loss_old)))
-        except BaseException, e:
+        except BaseException as e:
             logger.warning("Optimization Err at try %d : %s" % (k, str(e)))
 
     if opt_success:

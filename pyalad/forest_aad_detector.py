@@ -15,8 +15,10 @@ from random_split_trees import *
 from gp_support import *
 from optimization import *
 
-import cPickle
+import pickle as cPickle
 import gzip
+
+from joblib import Parallel, delayed
 
 
 class RegionData(object):
@@ -27,6 +29,7 @@ class RegionData(object):
         self.score = score
         self.node_samples = node_samples
         self.log_frac_vol = log_frac_vol
+        # print "Region's Path Length="+str(path_length)+"---"+str(node_samples)
 
 
 def is_in_region(x, region):
@@ -59,13 +62,12 @@ def transform_features(x, all_regions, d):
 
 
 class AadForest(StreamingSupport):
-
     def __init__(self, n_estimators=10, max_samples=100, max_depth=10,
-                 score_type=IFOR_SCORE_TYPE_INV_PATH_LEN,
+                 score_type=LEAF_INV_SAMPLE_SCORING,
                  ensemble_score=ENSEMBLE_SCORE_LINEAR,
                  random_state=None,
                  add_leaf_nodes_only=False,
-                 detector_type=AAD_IFOREST, n_jobs=1):
+                 detector_type=AAD_IFOREST, n_jobs=1, model=None):
         if random_state is None:
             self.random_state = np.random.RandomState(42)
         else:
@@ -78,21 +80,23 @@ class AadForest(StreamingSupport):
 
         self.score_type = score_type
         if not (self.score_type == IFOR_SCORE_TYPE_INV_PATH_LEN or
-                self.score_type == IFOR_SCORE_TYPE_INV_PATH_LEN_EXP or
-                self.score_type == IFOR_SCORE_TYPE_CONST or
-                self.score_type == IFOR_SCORE_TYPE_NEG_PATH_LEN or
-                self.score_type == HST_SCORE_TYPE or
-                self.score_type == RSF_SCORE_TYPE or
-                self.score_type == RSF_LOG_SCORE_TYPE or
-                self.score_type == ORIG_TREE_SCORE_TYPE):
+                        self.score_type == IFOR_SCORE_TYPE_INV_PATH_LEN_EXP or
+                        self.score_type == IFOR_SCORE_TYPE_CONST or
+                        self.score_type == IFOR_SCORE_TYPE_NEG_PATH_LEN or
+                        self.score_type == HST_SCORE_TYPE or
+                        self.score_type == RSF_SCORE_TYPE or
+                        self.score_type == RSF_LOG_SCORE_TYPE or
+                        self.score_type == ORIG_TREE_SCORE_TYPE or
+                        self.score_type == LEAF_INV_SAMPLE_SCORING):
             raise NotImplementedError("score_type %d not implemented!" % self.score_type)
 
         self.ensemble_score = ensemble_score
         self.add_leaf_nodes_only = add_leaf_nodes_only
-
+        self.clf = model
         if detector_type == AAD_IFOREST:
-            self.clf = IForest(n_estimators=n_estimators, max_samples=max_samples,
-                               n_jobs=n_jobs, random_state=self.random_state)
+            # setting clf to be learned model from my code
+            self.clf = model  # IForest(n_estimators=n_estimators, max_samples=max_samples,
+            # n_jobs=n_jobs, random_state=self.random_state)
         elif detector_type == AAD_HSTREES:
             self.clf = HSTrees(n_estimators=n_estimators, max_depth=max_depth,
                                n_jobs=n_jobs, random_state=self.random_state)
@@ -128,11 +132,13 @@ class AadForest(StreamingSupport):
         # IMPORTANT: Treat this as readonly once set in fit()
         self.w_unif_prior = None
 
-    def fit(self, x):
+    def fit_bkp(self, x):
         tm = Timer()
 
         tm.start()
-        self.clf.fit(x)
+        ### commented for now to make it compatible with my code.
+        ## I am passing perviously trained models
+        # self.clf.fit(x)
         # print len(clf.estimators_)
         # print type(clf.estimators_[0].tree_)
 
@@ -162,6 +168,66 @@ class AadForest(StreamingSupport):
         self.w = self.get_uniform_weights()
         self.w_unif_prior = self.get_uniform_weights()
         logger.debug(tm.message("created forest regions"))
+
+    def fit(self, x, multi=False):
+        tm = Timer()
+
+        tm.start()
+        ### commented for now to make it compatible with my code.
+        ## I am passing perviously trained models
+        # self.clf.fit(x)
+        # print len(clf.estimators_)
+        # print type(clf.estimators_[0].tree_)
+
+        logger.debug(tm.message("created original forest"))
+
+        if self.score_type == ORIG_TREE_SCORE_TYPE:
+            # no need to extract regions in this case
+            return
+
+        tm.start()
+        self.regions_in_forest = []
+        self.all_regions = []
+        self.all_node_regions = []
+        region_id = 0
+        if multi:
+            argument_instances = [(i, self.clf.estimators_[i], self.add_leaf_nodes_only) for i in
+                                  range(len(self.clf.estimators_))]
+            lst_regions = Parallel(n_jobs=-2, verbose=1)(map(delayed(self.worker_extract_leaf_regions_from_tree),
+                                                             argument_instances))
+            lst_regions.sort(key=lambda x: x[0])
+            lst_regions = [x[1] for x in lst_regions]
+
+            self.regions_in_forest = lst_regions
+            self.all_regions = [item for sublist in lst_regions for item in sublist]
+
+            for regions in lst_regions:
+                node_regions = {}
+                for region in regions:
+                    node_regions[region.node_id] = region_id
+                    region_id += 1  # this will monotonously increase across trees
+                self.all_node_regions.append(node_regions)
+
+        else:
+            for i in range(len(self.clf.estimators_)):
+                regions = self.extract_leaf_regions_from_tree(self.clf.estimators_[i],
+                                                              self.add_leaf_nodes_only)
+                self.regions_in_forest.append(regions)
+                self.all_regions.extend(regions)
+                node_regions = {}
+                for region in regions:
+                    node_regions[region.node_id] = region_id
+                    region_id += 1  # this will monotonously increase across trees
+                self.all_node_regions.append(node_regions)
+                # print "%d, #nodes: %d" % (i, len(regions))
+        self.d, _, _ = self.get_region_scores(self.all_regions)
+        self.w = self.get_uniform_weights()
+        self.w_unif_prior = self.get_uniform_weights()
+        logger.debug(tm.message("created forest regions"))
+
+    def worker_extract_leaf_regions_from_tree(self, arg):
+        tree_number, tree, add_leaf_nodes_only = arg
+        return tree_number, self.extract_leaf_regions_from_tree(tree, add_leaf_nodes_only)
 
     def extract_leaf_regions_from_tree(self, tree, add_leaf_nodes_only=False):
         """Extracts leaf regions from decision tree.
@@ -209,7 +275,7 @@ class AadForest(StreamingSupport):
                                           log_frac_vol=0. if log_frac_vol is None else log_frac_vol[node]))
                 return
             elif left[node] == -1 or right[node] == -1:
-                print "dubious node..."
+                print("dubious node...")
 
             feature = features[node]
 
@@ -295,7 +361,7 @@ class AadForest(StreamingSupport):
 
         n = x.shape[0]
         all_path_nodes = []
-        for i in xrange(n):
+        for i in range(n):
             path_nodes = []
             path_recurse(x[i, :], left, right, features, threshold, 0, path_nodes)
             all_path_nodes.append(path_nodes)
@@ -344,6 +410,8 @@ class AadForest(StreamingSupport):
                 d[i] = -region.node_samples * np.exp(region.log_frac_vol)
             elif self.score_type == RSF_LOG_SCORE_TYPE:
                 d[i] = -np.log(region.node_samples + 1) - region.log_frac_vol
+            elif self.score_type == LEAF_INV_SAMPLE_SCORING:
+                d[i] = 1. / (region.path_length + self._average_path_length(region.node_samples))
             else:
                 # if self.score_type == IFOR_SCORE_TYPE_NORM:
                 raise NotImplementedError("score_type %d not implemented!" % self.score_type)
@@ -357,7 +425,7 @@ class AadForest(StreamingSupport):
 
     def get_score(self, x, w=None):
         """Higher score means more anomalous"""
-        #if self.score_type == IFOR_SCORE_TYPE_INV_PATH_LEN or \
+        # if self.score_type == IFOR_SCORE_TYPE_INV_PATH_LEN or \
         #                self.score_type == IFOR_SCORE_TYPE_INV_PATH_LEN_EXP or \
         #                self.score_type == IFOR_SCORE_TYPE_CONST or \
         #                self.score_type == IFOR_SCORE_TYPE_NEG_PATH_LEN or \
@@ -399,7 +467,7 @@ class AadForest(StreamingSupport):
 
     def update_model_from_stream_buffer(self):
         self.clf.update_model_from_stream_buffer()
-        #for i, estimator in enumerate(self.clf.estimators_):
+        # for i, estimator in enumerate(self.clf.estimators_):
         #    estimator.tree.tree_.update_model_from_stream_buffer()
         self.update_region_scores()
 
@@ -410,11 +478,12 @@ class AadForest(StreamingSupport):
                     self.score_type == RSF_LOG_SCORE_TYPE):
             return self.d[region_id]
         elif self.score_type == ORIG_TREE_SCORE_TYPE:
-            raise ValueError("Score type %d not supported for method get_region_score_for_instance_transform()" % self.score_type)
+            raise ValueError(
+                "Score type %d not supported for method get_region_score_for_instance_transform()" % self.score_type)
         else:
             return self.d[region_id] / norm_factor
 
-    def transform_to_region_features(self, x, dense=True):
+    def transform_to_region_features(self, x, dense=True, multi=False):
         """ Transforms matrix x to features from isolation forest
 
         :param x: np.ndarray
@@ -431,7 +500,7 @@ class AadForest(StreamingSupport):
         if dense:
             return self.transform_to_region_features_dense(x)
         else:
-            return self.transform_to_region_features_sparse(x)
+            return self.transform_to_region_features_sparse(x, multi)
 
     def transform_to_region_features_dense(self, x):
         # return transform_features(x, self.all_regions, self.d)
@@ -439,7 +508,7 @@ class AadForest(StreamingSupport):
         self._transform_to_region_features_with_lookup(x, x_new)
         return x_new
 
-    def transform_to_region_features_sparse(self, x):
+    def transform_to_region_features_sparse_bkp(self, x):
         """ Transforms from original feature space to IF node space
         
         The conversion to sparse vectors seems to take a lot of intermediate
@@ -465,7 +534,7 @@ class AadForest(StreamingSupport):
                 n_tmp = x_tmp.shape[0]
                 node_regions = self.all_node_regions[i]
                 tree_paths = self.get_decision_path(x_tmp, tree)
-                for j in xrange(n_tmp):
+                for j in range(n_tmp):
                     k = len(tree_paths[j])
                     for node_idx in tree_paths[j]:
                         region_id = node_regions[node_idx]
@@ -474,11 +543,80 @@ class AadForest(StreamingSupport):
                 endtime = timer()
                 tdiff = difftime(endtime, starttime, units="secs")
                 logger.debug("processed %d/%d (%f); batch %d in %f sec(s)" %
-                             (end_batch + 1, n, (end_batch + 1)*1./n, batch_size, tdiff))
+                             (end_batch + 1, n, (end_batch + 1) * 1. / n, batch_size, tdiff))
             x_new = vstack([x_new, x_tmp_new.tocsr()])
             start_batch = end_batch
             end_batch = min(start_batch + batch_size, n)
         return x_new
+
+    def transform_to_region_features_sparse(self, x, multi=False):
+        """ Transforms from original feature space to IF node space
+
+        The conversion to sparse vectors seems to take a lot of intermediate
+        memory in python. This is why we are converting the vectors in smaller
+        batches. The transformation is a one-time task, hence not a concern in
+        most cases.
+
+        :param x:
+        :return:
+        """
+        # logger.debug("transforming to IF feature space...")
+        n = x.shape[0]
+        m = len(self.d)
+        batch_size = 10000
+        start_batch = 0
+        end_batch = min(start_batch + batch_size, n)
+        x_new = csr_matrix((0, m), dtype=float)
+        while start_batch < end_batch:
+            starttime = timer()
+            x_tmp = matrix(x[start_batch:end_batch, :], ncol=x.shape[1])
+            x_tmp_new = lil_matrix((end_batch - start_batch, m), dtype=x_new.dtype)
+
+            if multi:
+                n_tmp = x_tmp.shape[0]
+                argument_instances = [(x_tmp, n_tmp, i, self.clf.estimators_[i])
+                                      for i in range(len(self.clf.estimators_))]
+                lst_results = Parallel(n_jobs=-2, verbose=1)(map(delayed(self.worker_transform),
+                                                                 argument_instances))
+                for result in lst_results:
+                    for _tup in result:
+                        x_tmp_new[_tup[0], _tup[1]] = _tup[2]
+
+            else:
+                for i, tree in enumerate(self.clf.estimators_):
+                    n_tmp = x_tmp.shape[0]
+                    node_regions = self.all_node_regions[i]
+                    tree_paths = self.get_decision_path(x_tmp, tree)
+
+                    for j in range(n_tmp):
+                        k = len(tree_paths[j])
+                        for node_idx in tree_paths[j]:
+                            region_id = node_regions[node_idx]
+                            x_tmp_new[j, region_id] = self.get_region_score_for_instance_transform(region_id, k)
+
+            if n >= 100000:
+                endtime = timer()
+                tdiff = difftime(endtime, starttime, units="secs")
+                logger.debug("processed %d/%d (%f); batch %d in %f sec(s)" %
+                             (end_batch + 1, n, (end_batch + 1) * 1. / n, batch_size, tdiff))
+            x_new = vstack([x_new, x_tmp_new.tocsr()])
+            start_batch = end_batch
+            end_batch = min(start_batch + batch_size, n)
+        return x_new
+
+    def worker_transform(self, args):
+        x_tmp, n_tmp, i, tree = args
+        node_regions = self.all_node_regions[i]
+        tree_paths = self.get_decision_path(x_tmp, tree)
+
+        result = []
+        for j in range(n_tmp):
+            k = len(tree_paths[j])
+            for node_idx in tree_paths[j]:
+                region_id = node_regions[node_idx]
+                result.append((j, region_id, self.get_region_score_for_instance_transform(region_id, k)))
+
+        return result
 
     def _transform_to_region_features_with_lookup(self, x, x_new):
         """ Transforms from original feature space to IF node space
@@ -507,7 +645,7 @@ class AadForest(StreamingSupport):
                         endtime = timer()
                         tdiff = difftime(endtime, starttime, units="secs")
                         logger.debug("processed %d/%d trees, %d/%d (%f) in %f sec(s)" %
-                                     (i, len(self.clf.estimators_), j + 1, n, (j + 1)*1./n, tdiff))
+                                     (i, len(self.clf.estimators_), j + 1, n, (j + 1) * 1. / n, tdiff))
 
     def get_tau_ranked_instance(self, x, w, tau_rank):
         s = self.get_score(x, w)
@@ -603,6 +741,7 @@ class AadForest(StreamingSupport):
                                                     Ca=opts.Ca, Cn=opts.Cn, Cx=opts.Cx,
                                                     withprior=opts.withprior, w_prior=w_prior,
                                                     sigma2=opts.priorsigma2)
+
         if False:
             w_new = sgd(w, x[hf, :], y[hf], if_f, if_g,
                         learning_rate=0.001, max_epochs=1000, eps=1e-5,
@@ -826,7 +965,7 @@ class AadForest(StreamingSupport):
             # print "Loading metrics" + fpath
             metrics = load(fpath)
         else:
-            print "Cannot load " + fpath
+            print("Cannot load " + fpath)
         return metrics
 
 
@@ -851,6 +990,7 @@ def save_aad_model(filepath, model):
     cPickle.dump(model, f, protocol=cPickle.HIGHEST_PROTOCOL)
     f.close()
 
+
 def load_aad_model(filepath):
     f = gzip.open(filepath, 'rb')
     model = cPickle.load(f)
@@ -867,7 +1007,6 @@ def get_forest_aad_args(dataset="", detector_type=AAD_IFOREST,
                         Ca=100, Cx=0.001, sigma2=0.5,
                         budget=1, reruns=1, n_jobs=1, log_file="", plot2D=False,
                         streaming=False, stream_window=512, allow_stream_update=True):
-
     debug_args = [
         "--dataset=%s" % dataset,
         "--log_file=",
@@ -881,7 +1020,7 @@ def get_forest_aad_args(dataset="", detector_type=AAD_IFOREST,
         "--sigma2=%f" % sigma2,
         "--Ca=%f" % Ca,
         "--Cx=%f" % Cx,
-        "--ifor_n_trees=%d" % n_trees,  #  for backward compatibility
+        "--ifor_n_trees=%d" % n_trees,  # for backward compatibility
         "--ifor_n_samples=%d" % n_samples,  # for backward compatibility
         "--forest_n_trees=%d" % n_trees,
         "--forest_n_samples=%d" % n_samples,

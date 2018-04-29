@@ -171,7 +171,7 @@ def weight_update_simple_pairwise(x, y, hf, w, w_prior,
             if k % 1000 == 0:
                 logger.debug("Iter: %d; old loss: %f; loss: %f; del_loss: %f" %
                              (k, loss_old, loss, np.abs(loss - loss_old)))
-        except BaseException, e:
+        except BaseException as e:
             logger.warning("Optimization Err at try %d : %s" % (k, str(e)))
 
     if opt_success:

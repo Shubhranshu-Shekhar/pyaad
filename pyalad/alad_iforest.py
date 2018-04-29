@@ -162,7 +162,7 @@ class AadIsolationForest(object):
                                           node_samples[node]))
                 return
             elif left[node] == -1 or right[node] == -1:
-                print "dubious node..."
+                print ("dubious node...")
 
             feature = features[node]
 
@@ -247,7 +247,7 @@ class AadIsolationForest(object):
 
         n = x.shape[0]
         all_path_nodes = []
-        for i in xrange(n):
+        for i in range(n):
             path_nodes = []
             path_recurse(x[i, :], left, right, features, threshold, 0, path_nodes)
             all_path_nodes.append(path_nodes)
@@ -380,7 +380,7 @@ class AadIsolationForest(object):
                 n_tmp = x_tmp.shape[0]
                 node_regions = self.all_node_regions[i]
                 tree_paths = self.get_decision_path(x_tmp, tree)
-                for j in xrange(n_tmp):
+                for j in range(n_tmp):
                     k = len(tree_paths[j])
                     for node_idx in tree_paths[j]:
                         region_id = node_regions[node_idx]
@@ -689,7 +689,7 @@ class AadIsolationForest(object):
             # print "Loading metrics" + fpath
             metrics = load(fpath)
         else:
-            print "Cannot load " + fpath
+            print ("Cannot load " + fpath)
         return metrics
 
 
